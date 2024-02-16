@@ -1,4 +1,4 @@
-# <img src="static/hose_64x64.png" alt=""> hoses
+# <img src="_static/hose_64x64.png" alt=""> hoses
 
 Enhanced SOCKSv5 proxy implementation
 and related tools in Python3
