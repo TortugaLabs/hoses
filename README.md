@@ -1,4 +1,6 @@
-# <img src="_static/hose_64x64.png" alt=""> hoses
+<img src="_static/hose_64x64.png" alt="">
+
+# hoses
 
 Enhanced SOCKSv5 proxy implementation
 and related tools in Python3
@@ -45,7 +47,7 @@ The following references were consulted:
 - https://stackoverflow.com/questions/7186601/is-socks5-bind-persistent-or-one-time-only
 - https://en.wikipedia.org/wiki/SOCKS
 
-# Issues
+## Issues
 
 - Deal with SSL nonblocking sockets
   - https://docs.python.org/3/library/ssl.html#notes-on-non-blocking-sockets

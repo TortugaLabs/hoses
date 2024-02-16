@@ -1,0 +1,51 @@
+#!/bin/sh
+#
+# Run python using venv
+#
+venv="$(dirname "$0")"/.venv
+
+requirements() {
+  pip install docutils sphinx
+  pip install myst-parser sphinx-autodoc2 sphinx-argparse
+  # sphinx related dependancies
+  #~ pip install sphinx-autodoc2[cli]
+  pip install sphinxcontrib-globalsubs
+}
+if [ -d "$venv" ] ; then
+  # Make sure the venv has not been moved
+  (
+    [ x"$(cat "$venv/.realpath")" !=  x"$(readlink -f "$venv")" ] \
+    || [ x"$(cat "$venv/requirements.txt")" != x"$(declare -f requirements)" ]
+  ) && rm -rf "$venv"
+fi
+
+if [ ! -d "$venv" ] ; then
+  python3 -m venv --system-site-packages "$venv"
+  readlink -f "$venv" > "$venv/.realpath"
+  . "$venv"/bin/activate
+  declare -f requirements > "$venv"/requirements.txt
+  requirements
+else
+  . "$venv"/bin/activate
+fi
+
+if [ $# -eq 0 ] ; then
+  echo "No arguments specified" 1>&2
+  exit 1
+fi
+
+[ -e "$1" ] && [ ! -x "$1" ] && exec python3 "$@"
+
+if [ -f "$1" ] && [ -x "$1" ] ; then
+  cmd="$(readlink -f "$1")" ; shift
+  exec "$cmd" "$@"
+fi
+
+cmd=$(which "$1" 2>/dev/null)
+if [ -n "$cmd" ] ; then
+  shift
+  exec "$cmd" "$@"
+fi
+
+echo "$1: not found" 1>&2
+exit 1

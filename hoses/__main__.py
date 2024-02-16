@@ -1,7 +1,10 @@
 #!python
 import os
 import sys
-sys.path.insert(0,os.path.dirname(__file__))
+try:
+  sys.path.insert(0,os.path.dirname(__file__))
+except NameError:
+  ...
 import socket
 import socks5x as s5x
 from argparse import ArgumentParser, Action, Namespace
@@ -14,7 +17,6 @@ import logging
 import logging.config
 
 from __meta__ import version as VERSION
-
 
 def main_listen(ns: Namespace) -> None:
   '''function that implements the "listen" command
