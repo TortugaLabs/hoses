@@ -4,7 +4,7 @@
 # You can set these variables from the command line, and also
 # from the environment for the first two.
 SPHINXOPTS    ?=
-SPHINXBUILD   ?= $(shell type sphinx-build && echo sphinx-build || echo $$(pwd)/py sphinx-build)
+SPHINXBUILD   ?= $(shell type sphinx-build 1>&2 && echo sphinx-build || echo $$(pwd)/py sphinx-build)
 
 SOURCEDIR     = source
 BUILDDIR      = _build
