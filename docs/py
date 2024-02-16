@@ -11,13 +11,25 @@ requirements() {
   #~ pip install sphinx-autodoc2[cli]
   pip install sphinxcontrib-globalsubs
 }
+check_reqs() {
+  # This is needed because on Ubuntu, /bin/sh lacks "declare"
+  if type declare >/dev/null 2>&1 ; then
+    [ x"$(cat "$venv/requirements.txt")" != x"$(declare -f requirements)" ]
+    return $?
+  else
+    declare() { :; }
+    return 1
+  fi
+}
+
 if [ -d "$venv" ] ; then
   # Make sure the venv has not been moved
   (
     [ x"$(cat "$venv/.realpath")" !=  x"$(readlink -f "$venv")" ] \
-    || [ x"$(cat "$venv/requirements.txt")" != x"$(declare -f requirements)" ]
+    || check_reqs
   ) && rm -rf "$venv"
 fi
+
 
 if [ ! -d "$venv" ] ; then
   python3 -m venv --system-site-packages "$venv"
