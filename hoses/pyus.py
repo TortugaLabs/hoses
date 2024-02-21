@@ -111,7 +111,7 @@ def myself():
 saved_fds = []
 '''Used internally to save fds by null_io'''
 
-def null_io(close = False):
+def null_io(close = False, keep_stderr = False):
   '''Redirects I/O to `/dev/null`
 
   :param bool close: Defaults to False, if True, the current I/O channels are closed
@@ -129,12 +129,12 @@ def null_io(close = False):
       null_fd = os.open(os.devnull,os.O_RDWR)
       os.dup2(null_fd, 0)
       os.dup2(null_fd, 1)
-      os.dup2(null_fd, 2)
-      null_fd.close()
+      if not keep_stderr: os.dup2(null_fd, 2)
+      os.close(null_fd)
     else:
       saved_fds[0].close()
       saved_fds[1].close()
-      saved_fds[2].close()
+      if not saved_fds[2] is None: saved_fds[2].close()
       saved_fds[3].close()
     return
 
@@ -142,7 +142,7 @@ def null_io(close = False):
     null_fd = os.open(os.devnull,os.O_RDWR)
     saved_fds.append(os.dup(0))
     saved_fds.append(os.dup(1))
-    saved_fds.append(os.dup(2))
+    saved_fds.append(None if keep_stderr else os.dup(2))
     saved_fds.append(null_fd)
     saved_fds.append(0)
   else:
@@ -156,7 +156,7 @@ def null_io(close = False):
   saved_fds[4] += 1
   os.dup2(null_fd, 0)
   os.dup2(null_fd, 1)
-  os.dup2(null_fd, 2)
+  if not keep_stderr: os.dup2(null_fd, 2)
 
 def denull_io():
   '''Restores `null_io` redirections.
@@ -166,7 +166,7 @@ def denull_io():
 
   os.dup2(saved_fds[0], 0)
   os.dup2(saved_fds[1], 1)
-  os.dup2(saved_fds[2], 2)
+  if not saved_fds[2] is None: os.dup2(saved_fds[2], 2)
 
 #python
 import os
@@ -250,6 +250,18 @@ def unbuffered_io():
   '''
   sys.stdout = Unbuffered(sys.stdout)
   sys.stderr = Unbuffered(sys.stderr)
+
+#!python3
+
+def readfile(name):
+  '''Read the contents of a file as whole
+
+  :param str name: File name to read
+  :returns str: contents of file
+  '''
+  with open(name,'r') as fp:
+    text = fp.read()
+  return text
 
 
 ###$_end-include: mypylib/pyus.in.py

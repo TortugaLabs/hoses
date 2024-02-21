@@ -3,13 +3,21 @@
 Implements enhanced socks5 protocol in python
 
 """
-from ipaddress import ip_address, IPv4Address
-from enum import IntEnum
-import socket
-from struct import pack, unpack
-import os
+try:
+  from icecream import ic
+  ic.configureOutput(includeContext=True)
+except ImportError:  # Graceful fallback if IceCream isn't installed.
+  ic = lambda *a: None if not a else (a[0] if len(a) == 1 else a)  # noqa
+
 import logging
+import os
+import socket
+from enum import IntEnum
+from ipaddress import ip_address, IPv4Address
+from struct import pack, unpack
+
 from pyus import src
+
 
 class S5CMD(IntEnum):
   '''Enumeration for SOCKS5 commands'''
@@ -28,13 +36,7 @@ class S5STATUS(IntEnum):
   TIMEOUT = 0x06
   PROTOERROR = 0x07
   BADADDR = 0x08
-
-class ADDRTYPE(IntEnum):
-  '''Enumeration for SOCKS5 address types'''
-  IPv4 = 0x01
-  DNS = 0x03
-  IPv6 = 0x04
-  UNIX = 0x80
+  EOF = 0x101
 
 class AUTH(IntEnum):
   '''SOCKS5 Authentication methods'''
@@ -45,7 +47,6 @@ class AUTH(IntEnum):
   CRAM = 0x05
   SSL = 0x06
   NDSAUTH= 0x07
-
 
 PROTO_VER = 0x05
 '''implemented SOSCKS protocol version'''
@@ -82,20 +83,10 @@ def s5status_str(s):
     'Host unreachable', 'Conection refused', 'Timed out', 'Protocol or Unsupported error',
     'Bad address'
   ]
+  if s == S5STATUS.EOF: return 'End of Communications'
   if s < 0 or s >= len(status_str): return f'Unknown status ({s})'
   return status_str[s]
 
-def addrtype_str(a):
-  '''Returns a string represtantion of a SOCKS address type
-
-  :param int a: address type integer
-  :returns str: string version of the address type
-  '''
-  atypes_str = [ None, 'IPv4', None, 'DNS', 'IPv6']
-  if a == ADDRTYPE.UNIX: return 'unix'
-  if a < 0 or a >= len(atypes_str) or atypes_str[a] is None:
-    return f'Unknown Address ({a})'
-  return atypes_str[a]
 
 def auth_str(a):
   '''Returns a string represtantion of a SOCKS auth type
@@ -108,56 +99,178 @@ def auth_str(a):
     return f'Unknown auth type ({a})'
   return aa_str[a]
 
-def parse_addr(host: str):
-  '''Identify and parse a host address
 
-  :param str host: string containing address to parse
-  :returns int,str: the address type code, and the parsed address
-  '''
-  try:
-    addr = ip_address(host)
-    if type(addr) is IPv4Address:
-      return ADDRTYPE.IPv4, addr
+
+class SocksAddress:
+  '''Socks Address'''
+  IPv4 = 0x01
+  DNS = 0x03
+  IPv6 = 0x04
+  UNIX = 0x80
+
+  def enc_addr(self):
+    ''' Encode a SOCKS5 address
+    :returns bytes: encoded byte string
+    '''
+    if self.type is None: return b'\x00'
+
+    if self.type == SocksAddress.IPv4 or self.type == SocksAddress.IPv6:
+      return bytes([self.type]) +  self.addr.packed
     else:
-      return ADDRTYPE.IPv6, addr
-  except ValueError:
-    ...
-  if host.startswith('unix:'):
-    return ADDRTYPE.UNIX, host[5:]
-  else:
-    return ADDRTYPE.DNS, host
+      return bytes([self.type, len(self.addr.encode())]) + self.addr.encode()
 
-def enc_addr(host):
-  ''' Encode a SOCKS5 address
+  def __init__(self,*args):
+    '''Initialize a SocksAddress
 
-  :param str|tuple host: string containing an IPv4/IPv6/hostname to encode or a tuple from parse_addr
-  :returns bytes: encoded byte string
-  '''
-  if isinstance(host,list) or isinstance(host,tuple):
-    s5type, addr = host
-  else:
-    s5type, addr = parse_addr(host)
-  if s5type == ADDRTYPE.IPv4 or s5type == ADDRTYPE.IPv6:
-    return bytes(s5type) + addr.packed
-  else:
-    return bytes([s5type, len(addr.encode())]) + addr.encode()
+    Constructor modes:
 
-def map_s5type(s5type,addr):
-  '''Map s5type to AF
-  :param int s5type: s5 address type code
-  :param mixed addr: parsed address type
-  :returns AF,str: Returns Adress family code, address to use in bind or connect functions
-  '''
-  if s5type == ADDRTYPE.IPv4:
-    return socket.AF_INET, addr.compressed
-  elif s5type == ADDRTYPE.IPv6:
-    return socket.AF_INET6, addr.compressed
-  elif s5type == ADDRTYPE.UNIX:
-    return socket.AF_UNIX, addr
-  elif s5type == ADDRTYPE.DNS:
-    return DEFAULT_AF, addr
-  else:
-    raise ValueError
+    - `SocksAddress()` : Creates a Null address
+    - `SocksAddress(str)` : Initializes instance by parsing string
+    - `SocksAddress(socket)` : Reads address from socket
+    '''
+
+    if len(args) == 0:
+      self.type = None # No type defined
+      self.addr = None
+    elif len(args) == 1:
+      if isinstance(args[0],str):
+        self.type, self.addr = SocksAddress.parse_addr(args[0])
+      elif isinstance(args[0],socket.socket):
+        self.type, self.addr = SocksAddress.recv_addr(args[0])
+      else:
+        raise TypeError(f'Invalid object {args[0]}')
+    elif len(args) == 2:
+      if isinstance(args[0],bytes):
+        self.type, self.addr, bcount = SocksAddress.read_buffer(args[0])
+        args[1]['bcount'] = bcount
+      else:
+        raise TypeError(f'Invalid object {args[0]}')
+    else:
+      raise TypeError('Function usage error')
+
+  def read_buffer(buf):
+    '''Fetch address from buffer
+
+    :param bytes buf: buffer to read
+    :returns int,bytes,int: type, address, byte count
+    '''
+    bcount = 1
+    s5type = buf[0]
+    if s5type == SocksAddress.IPv4:
+      addr = buf[1:5]
+      addr = ip_address(addr)
+      bcount += 4
+    elif s5type == SocksAddress.IPv6:
+      addr = buf[1:17]
+      addr = ip_address(addr)
+      bcount += 16
+    elif s5type == SocksAddress.DNS:
+      addr = buf[1]
+      bcount += addr + 1
+      addr = buf[2:2+addr]
+      addr = addr.decode() if isinstance(addr,bytes) else addr
+    elif s5type == SocksAddress.UNIX:
+      addr = buf[1]
+      bcount += addr + 1
+      addr = buf[2:2+addr]
+      addr = addr.decode() if isinstance(addr,bytes) else addr
+    else:
+      raise ValueError(f'Invalid AddressType: {s5type}')
+    return s5type, addr, bcount
+
+  def recv_addr(sock: socket.socket):
+    '''Read Socks5 address from a socket
+
+    :param socket.socket sock: Socket for reading
+    :returns int,addr: socks5 type, packed address
+    '''
+    s5type = sock.recv(1)
+    s5type = s5type[0]
+
+    if s5type == SocksAddress.IPv4:
+      addr = sock.recv(4)
+      addr = ip_address(addr)
+    elif s5type == SocksAddress.IPv6:
+      addr = sock.recv(16)
+      addr = ip_address(addr)
+      return s5type, addr
+    elif s5type == SocksAddress.DNS:
+      addr = sock.recv(1)
+      addr = sock.recv(addr[0])
+      addr = addr.decode() if isinstance(addr,bytes) else addr
+    elif s5type == SocksAddress.UNIX:
+      addr = sock.recv(1)
+      addr = sock.recv(addr[0])
+      addr = addr.decode() if isinstance(addr,bytes) else addr
+    else:
+      raise ValueError(f'Invalid AddressType: {s5type}')
+    return s5type, addr
+
+  def parse_addr(host: str):
+    '''Identify and parse a host address
+
+    :param str host: string containing address to parse
+    :returns int,str: the address type code, and the parsed address
+    '''
+    try:
+      addr = ip_address(host)
+      if type(addr) is IPv4Address:
+        return SocksAddress.IPv4, addr
+      else:
+        return SocksAddress.IPv6, addr
+    except ValueError:
+      ...
+    if host.startswith('unix:'):
+      return SocksAddress.UNIX, host[5:]
+    else:
+      return SocksAddress.DNS, host
+
+  def map_s5type(self):
+    '''Map s5type to AF
+    :returns AF,str: Returns Adress family code, address to use in bind or connect functions
+    '''
+    match self.type:
+      case SocksAddress.IPv4:
+        return socket.AF_INET, self.addr.compressed
+      case SocksAddress.IPv6:
+        return socket.AF_INET6, self.addr.compressed
+      case SocksAddress.UNIX:
+        return socket.AF_UNIX, self.addr
+      case SocksAddress.DNS:
+        return DEFAULT_AF, self.addr
+      case other:
+        raise ValueError(f'Unknown s5type: {self.type}')
+
+  def addr_str(self):
+    '''Format address as a string
+    :returns str: string representation of address
+    '''
+    match self.type:
+      case SocksAddress.IPv4:
+        return self.addr.compressed
+      case SocksAddress.IPv6:
+        return self.addr.compressed
+      case SocksAddress.UNIX:
+        return self.addr
+      case SocksAddress.DNS:
+        return self.addr
+      case other:
+        raise ValueError(f'Unknown s5type: {self.type}')
+
+  def addrtype_str(a):
+    '''Returns a string represtantion of a SOCKS address type
+
+    :param int|self a: address type integer
+    :returns str: string version of the address type
+    '''
+    if isinstance(a,SocksAddress): a = a.type
+
+    atypes_str = [ None, 'IPv4', None, 'DNS', 'IPv6']
+    if a == SocksAddress.UNIX: return 'unix'
+    if a < 0 or a >= len(atypes_str) or atypes_str[a] is None:
+      return f'Unknown Address ({a})'
+    return atypes_str[a]
+
 
 def enc_port(port):
   '''Encode a SOCKS5 port
@@ -172,10 +285,10 @@ def sendmsg(sock, msg, addr, port):
 
   :param socket.socket sock: communications socket
   :param int msg: command or status code to send
-  :param str addr: Address for the message as IPv4, IPv6 or DNS name
+  :param SocksAddress addr: Address for the message
   :param int port: port for this message
   '''
-  sock.sendall(bytes([PROTO_VER,msg, 0])+ enc_addr(addr) + enc_port(port))
+  sock.sendall(bytes([PROTO_VER,msg, 0])+ addr.enc_addr() + enc_port(port))
 
 def recvmsg(sock):
   ''' Read a SOCKS5 message
@@ -186,36 +299,25 @@ def recvmsg(sock):
   # +----+-----+-------+------+----------+----------+
   # |VER | MSG |  RSV  | ATYP | DST.ADDR | DST.PORT |
   # +----+-----+-------+------+----------+----------+
-  s5req = sock.recv(4)
+  s5req = sock.recv(1024)
+  if len(s5req) == 0: return S5STATUS.EOF, None, None
+  # ~ ic('Read Bytes',len(s5req),s5req)
+
+  # ~ try:
+    # ~ if s5req[0] != PROTO_VER or s5req[2] != 0x00:
+      # ~ raise ValueError('Invalid Proto ver or Reserved byte')
+  # ~ except IndexError:
+    # ~ logging.error(f'Protocol error in {src()}')
+    # ~ raise
   if s5req[0] != PROTO_VER or s5req[2] != 0x00:
-    raise ValueError
+    raise ValueError('Invalid Proto ver or Reserved byte')
 
   msg = s5req[1]
-  s5type = s5req[3]
-
-  if s5type == ADDRTYPE.IPv4:
-    addr = sock.recv(4)
-    addr = ip_address(addr)
-    addr = addr.compressed
-  elif s5type == ADDRTYPE.IPv6:
-    addr = sock.recv(16)
-    addr = ip_address(addr)
-    addr = addr.compressed
-  elif s5type== ADDRTYPE.DNS:
-    addr = sock.recv(1)
-    addr = sock.recv(addr[0])
-    addr = addr.decode()
-  elif s5type == ADDRTYPE.UNIX:
-    addr = sock.recv(1)
-    addr = sock.recv(addr[0])
-    addr = addr.decode()
-  else:
-    raise ValueError
-
-  port = sock.recv(2)
+  ext = {}
+  addr = SocksAddress(s5req[3:],ext)
+  port = s5req[3+ext['bcount']:5+ext['bcount']]
   port, = unpack('!H',port)
-
-  return msg, s5type, addr, port
+  return msg, addr, port
 
 def client_handshake(sock):
   '''Perform the client side of the handshake
@@ -250,18 +352,22 @@ def bind_port(addr, port):
   When binding UNIX addresses, usually the port is ignored unless
   the socket path already exists, if that is the case if port == 0
   then the socket path will be removed.
-  
+
   """
-  if isinstance(addr,list) or isinstance(addr,tuple):
-    s5type, addr = addr
-  else:
-    s5type, addr = parse_addr(addr)
-  af, addr = map_s5type(s5type, addr)
+
+  if isinstance(addr,str):
+    if addr == '' or addr == '*': addr = '::'
+    addr = SocksAddress(addr)
+
+  af, addr = addr.map_s5type()
 
   sock = socket.socket(af, socket.SOCK_STREAM)
-  logging.info(f'Bind {addr}:{port} ({src()})')
+  logging.info(f'Bind {addr}:{port} {src()}')
   sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
   if af == socket.AF_INET6:
+    if socket.has_dualstack_ipv6():
+      sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+
     sock.bind((addr, port, 0, 0))
   elif af == socket.AF_UNIX:
     if port == 0 and os.path.exists(addr):
@@ -274,17 +380,14 @@ def bind_port(addr, port):
 
 def connect_to(dst_addr, dst_port):
   """ Connect to desired destination
-  :param str dst_addr: destination address
+  :param str|SocksAddress dst_addr: destination address
   :param int dst_port: port
   :returns socket.socket: connected socket
 
   Creates a socket and proceeds to stablish a connection.
   """
-  if isinstance(dst_addr,list) or isinstance(dst_addr,tuple):
-    s5type, addr = dst_addr
-  else:
-    s5type, addr = parse_addr(dst_addr)
-  af, addr = map_s5type(s5type, addr)
+  if isinstance(dst_addr,str): dst_addr = SocksAddress(dst_addr)
+  af, addr = dst_addr.map_s5type()
 
   sock = socket.socket(af, socket.SOCK_STREAM)
 
@@ -296,3 +399,10 @@ def connect_to(dst_addr, dst_port):
   else:
     sock.connect((addr, dst_port))
   return sock
+
+if __name__ == '__main__':
+  ...
+  # ~ addr = SocksAddress('127.0.0.1')
+  # ~ ic(addr)
+  # ~ addr = SocksAddress('localhost')
+  # ~ ic(addr)

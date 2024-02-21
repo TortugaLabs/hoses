@@ -1,21 +1,28 @@
 #!python
+try:
+  from icecream import ic
+  ic.configureOutput(includeContext=True)
+except ImportError:  # Graceful fallback if IceCream isn't installed.
+  ic = lambda *a: None if not a else (a[0] if len(a) == 1 else a)  # noqa
+
 import os
 import sys
+import socket
+import logging
+import logging.config
+from argparse import ArgumentParser, Action, Namespace
+
 try:
   sys.path.insert(0,os.path.dirname(__file__))
 except NameError:
   ...
-import socket
-import socks5x as s5x
-from argparse import ArgumentParser, Action, Namespace
-import hoses
+
 import access
+import hose
+import netcat
+import socks5x as s5x
 import pyus
 from pyus import src
-
-import logging
-import logging.config
-
 from __meta__ import version as VERSION
 
 def main_listen(ns: Namespace) -> None:
@@ -25,20 +32,32 @@ def main_listen(ns: Namespace) -> None:
   Essentially this command is equivalent to `netcat -l -p port`
   '''
   if ns.sockss_server is None:
-    hoses.inetd(address = ns.address,
+    netcat.inetd(address = ns.address,
                 port = ns.port,
                 dest = ns.dest,
                 background = ns.background,
                 persist = ns.persist,
-                cmd = ns.exec)
+                cmd = ns.exec,
+                cert = ns.cert,
+                key = ns.key,
+                ca = ns.ca,
+                tls = ns.tls)
+
   else:
-    hoses.listener(sockss_server = ns.sockss_server,
+    if ns.tls in ('wrap','unwrap'):
+      ic(ns.tls)
+      logging.error('Can not enable TLS when using SOCKSS proxy')
+      sys.exit(1)
+    netcat.listener(sockss_server = ns.sockss_server,
                   sockss_port = ns.sockss_port,
                   address = ns.address,
                   port = ns.port,
                   dest = ns.dest,
                   background = ns.background,
                   persist = ns.persist,
+                  cert = ns.cert,
+                  key = ns.key,
+                  ca = ns.ca,
                   cmd = ns.exec)
 
 def main_connect(ns: Namespace) -> None:
@@ -48,10 +67,17 @@ def main_connect(ns: Namespace) -> None:
   Essentially this is equivalent to `netcat target port`
   '''
   if ns.sockss_server is None:
-    hoses.netcat(host = ns.target,
-                  port = ns.port)
+    netcat.client(host = ns.target,
+                  port = ns.port,
+                  cert = ns.cert,
+                  key = ns.key,
+                  ca = ns.ca,
+                  tls = ns.tls)
   else:
-    hoses.connect(sockss_server = ns.sockss_server,
+    if ns.tls:
+      logging.error('Can not enable TLS when using SOCKSS proxy')
+      sys.exit(1)
+    netcat.connect(sockss_server = ns.sockss_server,
                   sockss_port = ns.sockss_port,
                   target = ns.target,
                   port = ns.port,
@@ -71,7 +97,7 @@ def main_proxy(ns: Namespace) -> None:
     logging.error(f'Unable to starts proxy: no sockss address specified {src()}')
     sys.exit(1)
 
-  hoses.proxy(sockss_server = ns.sockss_server,
+  hose.proxy(sockss_server = ns.sockss_server,
               sockss_port = ns.sockss_port,
               cert = ns.cert,
               key = ns.key,
@@ -92,9 +118,8 @@ def cli_parse():
 
   cli = ArgumentParser(prog='hoses',
                       description='Enhanced socks5 tools')
-  cli.add_argument('-6','--ipv6',help='Prefer IPv6 protocol',action='store_true')
   cli.add_argument('-4','--ipv4',help='Prefer IPv4 protocol',dest='ipv6',action='store_false')
-  cli.add_argument('-d','--debug', help='Enable debugging',action='store_true')
+  cli.add_argument('-6','--ipv6',help='Prefer IPv6 protocol',action='store_true')
   cli.add_argument('-V','--version', action='version', version='%(prog)s '+VERSION)
   cli.add_argument('-S','--sockss-server', help='sockss server name',default=default_proxy_host)
   cli.add_argument('-P','--sockss-port', help='sockss server port',type=int,default=default_proxy_port)
@@ -109,14 +134,19 @@ def cli_parse():
 
   sub = cli.add_subparsers()
   client_cmd = sub.add_parser('connect',help='Connect to target')
+  client_cmd.add_argument('--tls', help='Connect using TLS (cannot be used with socks proxy)',default=False, action='store_true')
   client_cmd.add_argument('target',help='Target hostname')
   client_cmd.add_argument('port',help='Target port',type=int)
   client_cmd.set_defaults(func = main_connect)
 
   proxy_cmd = sub.add_parser('proxy',help='Run proxy server')
+  proxy_cmd.add_argument('-l','--log',help='Path to audit log file', default=None,dest='audit_log')
   proxy_cmd.set_defaults(func = main_proxy)
 
   listen_cmd = sub.add_parser('listen',help='Listen for connections')
+  listen_cmd.add_argument('--wrap', help='Forwarded connections as TLS connections',default='none', dest='tls', action='store_const',const='wrap')
+  listen_cmd.add_argument('--unwrap', help='Forwarded connections as TLS connections',default='none', dest='tls', action='store_const',const='unwrap')
+
   listen_cmd.add_argument('-p','--persist', help='Persist this binding', action='store_true',default=False)
   listen_cmd.add_argument('-f','--background', help='go to background after connection', action='store_true', default=False)
   listen_cmd.add_argument('--exec',help='Will execute command', action='store_true', default=False)
@@ -157,12 +187,14 @@ if __name__ == '__main__':
   sys.argv = pyus.file_args(sys.argv)
   parse = cli_parse()
   args = parse.parse_args()
+  ic(args)
   if args.func is None:
     parse.print_help()
     sys.exit(8)
-
   if not args.access is None:
     access.ACCESS_RULES = args.access
+  if 'audit_log' in args:
+    hose.AUDIT_LOG = args.audit_log
 
   # Configure logging options
   if not parse_logging_opts(args.log_opt) and not args.log_cfg is None:

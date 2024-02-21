@@ -43,7 +43,7 @@ version = ".".join(release.split(".")[0:2])
 extensions = [
                'sphinxarg.ext',   # argparse https://sphinx-argparse.readthedocs.io/en/stable/index.html
                'myst_parser',     # Markdown support
-               'autodoc2',        #
+               'autodoc2',        # Automatic doc generation
               ]
 myst_enable_extensions = [
   'tasklist',

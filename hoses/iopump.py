@@ -1,6 +1,12 @@
 #python3
+try:
+  from icecream import ic
+  ic.configureOutput(includeContext=True)
+except ImportError:  # Graceful fallback if IceCream isn't installed.
+  ic = lambda *a: None if not a else (a[0] if len(a) == 1 else a)  # noqa
 
 import socket
+import ssl
 from enum import IntEnum
 import os
 import sys
@@ -18,7 +24,7 @@ class IOHelper:
   WR = 0x01
   RD = 0x02
   CLOSED = 0x03
-  BUFSIZE = 2048
+  BUFSIZE = 1024
 
   def __init__(self):
     '''constructor'''
@@ -39,12 +45,12 @@ class IOHelper:
     '''
     # we do this to properly detect socket tear downs
     res = self.status & IOHelper.RD != IOHelper.RD
-    if not res and self.status & IOHelper.WR != IOHelper.WR:
-      # Check if the writing side is still up...
-      try:
-        self.send(b'')
-      except BrokenPipeError:
-        self.status |= IOHelper.WR
+    # ~ if not res and self.status & IOHelper.WR != IOHelper.WR:
+      # ~ # Check if the writing side is still up...
+      # ~ try:
+        # ~ self.send(b'')
+      # ~ except BrokenPipeError:
+        # ~ self.status |= IOHelper.WR
     return res
 
   def pump(self, out):
@@ -59,7 +65,7 @@ class IOHelper:
 class SockHelper(IOHelper):
   '''Helper for socket connections'''
   def __init__(self, sock: socket.socket):
-    ''' Constructor 
+    ''' Constructor
     :param socket.socket sock: socket to initialize
     '''
     super().__init__()
@@ -71,9 +77,9 @@ class SockHelper(IOHelper):
     '''
     return self.sock
   def recv(self, sz: int) -> bytes:
-    ''' Receive network data 
+    ''' Receive network data
     :param int sz: byte count to read
-    :returns bytes: read data    
+    :returns bytes: read data
     '''
     try:
       return self.sock.recv(sz)
@@ -88,8 +94,8 @@ class SockHelper(IOHelper):
     '''Shutdown a connection
     :param int s: how to shutdown connection, use IOHelper.RD or IOHelper.WR
 
-    Will close for reading if s is IOHelper.RD or for writing if s is 
-    IOHelper.WR.  
+    Will close for reading if s is IOHelper.RD or for writing if s is
+    IOHelper.WR.
     '''
     super().shutdown(s)
     if s & IOHelper.RD == IOHelper.RD:
@@ -103,6 +109,59 @@ class SockHelper(IOHelper):
     if self.status & IOHelper.RD != IOHelper.RD: self.sock.shutdown(socket.SHUT_RD)
     if self.status & IOHelper.WR != IOHelper.WR: self.sock.shutdown(socket.SHUT_WR)
     self.sock.close()
+
+class SSLSockHelper(SockHelper):
+  '''Handle the "Specials" related to SSL sockets.
+
+  Tested on void linux.  On Ubuntu Linux, this doesn't seem to matter.
+  Apprently
+  '''
+  def __init__(self, sock: socket.socket):
+    ''' Constructor
+    :param socket.socket sock: socket to initialize
+    '''
+    super().__init__(sock)
+    self.rpkt = 0
+    self.spkt = 0
+  def recv(self, sz: int) -> bytes:
+    ''' Receive network data
+    :param int sz: byte count to read
+    :returns bytes: read data
+    '''
+    data = super().recv(sz)
+    if data != b'': self.rpkt += 1
+    return data
+  def send(self, data: bytes) -> None:
+    '''Send network data
+    :param bytes data: data to send
+    '''
+    self.spkt += 1
+    super().send(data)
+  def shutdown(self, s: int) -> None:
+    '''Shutdown a connection
+    :param int s: how to shutdown connection, use IOHelper.RD or IOHelper.WR
+
+    Will close for reading if s is IOHelper.RD or for writing if s is
+    IOHelper.WR.
+    '''
+    IOHelper.shutdown(self, s) # Skip the SockHelper implmentation
+    # ~ ic(self.status, self.sock, self.rpkt,self.spkt)
+
+      # ~ return
+    if s & IOHelper.RD == IOHelper.RD:
+      try:
+        self.sock.shutdown(socket.SHUT_RD)
+      except OSError as e:
+        if e.errno != errno.ENOTCONN: raise
+    if s & IOHelper.WR == IOHelper.WR and self.spkt > 0:
+      # For SSL, if we have never written to this socket,
+      # we do not really close it as the handshake may not have been
+      # completed
+      try:
+        self.sock.shutdown(socket.SHUT_WR)
+      except OSError as e:
+        if e.errno != errno.ENOTCONN: raise
+
 
 class PipeHelper(IOHelper):
   '''Helper for stdin/stdout connections'''
@@ -121,24 +180,26 @@ class PipeHelper(IOHelper):
     '''
     return self.inp
   def recv(self,sz: int) -> bytes:
-    ''' Receive pipe data 
+    ''' Receive pipe data
     :param int sz: byte count to read
-    :returns bytes: read data    
+    :returns bytes: read data
     '''
-    x = self.inp.read(sz)
-    return x
-    # ~ return self.inp.read(sz)
+    return self.inp.read(sz)
   def send(self,data: bytes) -> None:
     '''Send pipe data
     :param bytes data: data to send
     '''
-    self.out.write(data)
+    try:
+      self.out.write(data)
+    except BrokenPipeError:
+      super().shutdown(IOHelper.WR)
+      self.out.close()
   def shutdown(self, s: int):
     '''Shutdown a connection
     :param int s: how to shutdown connection, use IOHelper.RD or IOHelper.WR
 
-    Will close for reading if s is IOHelper.RD or for writing if s is 
-    IOHelper.WR.  
+    Will close for reading if s is IOHelper.RD or for writing if s is
+    IOHelper.WR.
     '''
     super().shutdown(s)
     if s & IOHelper.WR == IOHelper.WR: self.out.close()
@@ -157,7 +218,9 @@ def add_iohelper(io):
 
   if isinstance(io,IOHelper):
     # No need to do anything
-    return io    
+    return io
+  elif isinstance(io, ssl.SSLSocket):
+    return SSLSockHelper(io)
   elif isinstance(io, socket.socket):
     return SockHelper(io)
   elif isinstance(io, list) or isinstance(io, tuple):
@@ -174,6 +237,7 @@ def pump(ioa,iob) -> None:
   '''
   ioa = add_iohelper(ioa)
   iob = add_iohelper(iob)
+
 
   while ioa.not_closed() and iob.not_closed():
     selector = []
@@ -193,6 +257,4 @@ def pump(ioa,iob) -> None:
 if __name__ == '__main__':
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   sock.connect(('localhost', 8090))
-
   pump(sock, (sys.stdin,sys.stdout))
-
