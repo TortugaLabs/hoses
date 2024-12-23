@@ -182,6 +182,9 @@ def serve_client(sock, peer):
         break
 
     listener.close()
+    if addr.type == s5x.SocksAddress.UNIX:
+      _, sockpath = addr.map_s5type()
+      if os.path.exists(sockpath): os.remove(sockpath)
 
     ic(addr,port,iinfo)
     logging.debug(f'{iinfo} {src()}')
